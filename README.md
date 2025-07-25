@@ -5,7 +5,7 @@ Using Gemini's capacity of reading video and 2M context window, this Discord bot
 2. Download [yt-dlp](https://github.com/yt-dlp/yt-dlp/releases/tag/2024.08.06) and [ffmpeg](https://github.com/BtbN/FFmpeg-Builds/releases) inside the file  
 example for windows:  
 ![image](https://github.com/user-attachments/assets/5925b43f-8338-48c0-88d9-c3b00e901109)
-3. Install dependencies
+3. Install dependencies by `uv sync`
 4. Rename .env.example to .env and fill in API keys
 5. run it! `python3 bot.py`
 # Demo
