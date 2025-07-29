@@ -1,11 +1,11 @@
 from load_config import gemini_api_key
-import google.generativeai as genai
+import google.genai as genai
 import asyncio
 
-genai.configure(api_key=gemini_api_key)
+client = genai.Client(api_key=gemini_api_key)
 
 def upload_to_gemini(path):
-    file = genai.upload_file(path)
+    file = client.files.upload(path=path)
     print(f"Uploaded file '{file.display_name}' as: {file.uri}")
     return file
 
@@ -17,47 +17,53 @@ generation_config = {
     "response_mime_type": "text/plain",
 }
 
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-pro",
-    generation_config=generation_config,
-    system_instruction="You are a video analyzer, you have to watch the video user provided, and respond with detailed description of the video. User may ask follow-up questions. User is using language zh-tw, please also use zh-tw to reply them.",
-    safety_settings=[
-        {
-            "category": "HARM_CATEGORY_HARASSMENT",
-            "threshold": "block_none"
-        },
-        {
-            "category": "HARM_CATEGORY_HATE_SPEECH",
-            "threshold": "block_none"
-        },
-        {
-            "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-            "threshold": "block_none"
-        },
-        {
-            "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-            "threshold": "block_none"
-        }
-    ]
-)
+safety_settings=[
+    {
+        "category": "HARM_CATEGORY_HARASSMENT",
+        "threshold": "block_none"
+    },
+    {
+        "category": "HARM_CATEGORY_HATE_SPEECH",
+        "threshold": "block_none"
+    },
+    {
+        "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+        "threshold": "block_none"
+    },
+    {
+        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+        "threshold": "block_none"
+    }
+]
+
+system_instruction="You are a video analyzer, you have to watch the video user provided, and respond with detailed description of the video. User may ask follow-up questions. User is using language zh-tw, please also use zh-tw to reply them."
 
 async def generate_analyze(file):
     global convo
-    convo = model.start_chat()
+    convo = client.chats.create(
+        model='models/gemini-1.5-pro',
+        history=[],
+        config=dict(
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+            system_instruction=system_instruction,
+        )
+    )
     is_finished = False
 
     retry_times = 0
     while not is_finished:
         try:
-            reply_msg = await convo.send_message_async(
-                [file]
+            reply_msg = await client.aio.chats.send_message(
+                chat=convo.name,
+                contents=[file]
             )
             is_finished = True
         except Exception as e:
             print(f"Error: {e}")
             print("retrying...")
             retry_times += 1
-            asyncio.sleep(1)
+            await asyncio.sleep(1)
 
             if retry_times > 5:
                 return "Error: Too many retries. Please try again later. Last error: " + str(e)
@@ -71,15 +77,16 @@ async def ask_followup(question):
     is_finished = False
     while not is_finished:
         try:
-            reply_msg = await convo.send_message_async(
-                question
+            reply_msg = await client.aio.chats.send_message(
+                chat=convo.name,
+                contents=[question]
             )
             is_finished = True
         except Exception as e:
             print(f"Error: {e}")
             print("retrying...")
             retry_times += 1
-            asyncio.sleep(1)
+            await asyncio.sleep(1)
 
             if retry_times > 5:
                 return "Error: Too many retries. Please try again later. Last error: " + str(e)
