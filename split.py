@@ -1,49 +1,39 @@
 import re
 
-async def splitmsg(text, max_length=2000):
-    def split_large_segment(segment, max_length):
-        parts = []
-        while len(segment) > max_length:
-            last_space = segment.rfind(' ', 0, max_length)
-            if last_space == -1:
-                last_space = max_length
-            parts.append(segment[:last_space])
-            segment = segment[last_space:].lstrip()
-        parts.append(segment)
-        return parts
+async def splitmsg(text: str, max_length: int = 2000):
+    """
+    將長訊息分割成多個較短的區塊，同時避免在程式碼區塊內分割。
 
-    segments = []
-    pattern = re.compile(r'```(.*?)```', re.DOTALL)
-    pos = 0
+    Args:
+        text (str): 要分割的原始文字。
+        max_length (int): 每個區塊的最大長度。
 
-    for match in pattern.finditer(text):
-        pre_text = text[pos:match.start()]
-        if pre_text:
-            pre_segments = split_large_segment(pre_text, max_length)
-            if pre_segments:
-                code_block = match.group()
-                if len(pre_segments[-1] + code_block) <= max_length:
-                    pre_segments[-1] += code_block
-                    code_block = None
-                segments.extend(pre_segments)
-        if code_block:
-            if len(code_block) > max_length:
-                language = re.match(r'```(\w+)', code_block)
-                lang = language.group(1) if language else ''
-                code_content = code_block[len(lang)+3:-3]
-                block_parts = split_large_segment(code_content, max_length-len(lang)-6)
-                segments.extend([f'```{lang}\n{part}\n```' for part in block_parts])
-            else:
-                segments.append(code_block)
-        pos = match.end()
-    if pos < len(text):
-        segments.extend(split_large_segment(text[pos:], max_length))
-    
-    final_segments = []
-    for segment in segments:
-        if len(segment) > max_length:
-            final_segments.extend(split_large_segment(segment, max_length))
+    Returns:
+        list[str]: 分割後的訊息區塊列表。
+    """
+    chunks = []
+    current_chunk = ""
+    in_code_block = False
+    lines = text.split('\n')
+
+    for line in lines:
+        # 檢查是否為程式碼區塊的開頭或結尾
+        if line.strip().startswith('```'):
+            in_code_block = not in_code_block
+        
+        # 如果將此行加入目前的區塊會超過最大長度，且不在程式碼區塊內
+        if len(current_chunk) + len(line) + 1 > max_length and not in_code_block:
+            if current_chunk:
+                chunks.append(current_chunk)
+            current_chunk = line
         else:
-            final_segments.append(segment)
-    
-    return final_segments
+            if current_chunk:
+                current_chunk += '\n' + line
+            else:
+                current_chunk = line
+
+    # 加入最後剩餘的區塊
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
