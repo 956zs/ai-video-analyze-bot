@@ -3,5 +3,6 @@ import dotenv
 
 dotenv.load_dotenv()
 
-gemini_api_key = os.getenv("GEMINI_API_KEY")
+openai_api_key = os.getenv("OPENAI_API_KEY")
+openai_base_url = os.getenv("OPENAI_BASE_URL")
 discord_token = os.getenv("DC_TOKEN")

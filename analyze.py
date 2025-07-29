@@ -1,93 +1,86 @@
-from load_config import gemini_api_key
-import google.genai as genai
+from openai import OpenAI
 import asyncio
 
-client = genai.Client(api_key=gemini_api_key)
+from load_config import openai_api_key, openai_base_url
 
-def upload_to_gemini(path):
-    file = client.files.upload(path=path)
-    print(f"Uploaded file '{file.display_name}' as: {file.uri}")
-    return file
-
-generation_config = {
-    "temperature": 1,
-    "top_p": 0.95,
-    "top_k": 64,
-    "max_output_tokens": 2000,
-    "response_mime_type": "text/plain",
-}
-
-safety_settings=[
-    {
-        "category": "HARM_CATEGORY_HARASSMENT",
-        "threshold": "block_none"
-    },
-    {
-        "category": "HARM_CATEGORY_HATE_SPEECH",
-        "threshold": "block_none"
-    },
-    {
-        "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-        "threshold": "block_none"
-    },
-    {
-        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-        "threshold": "block_none"
-    }
-]
-
-system_instruction="You are a video analyzer, you have to watch the video user provided, and respond with detailed description of the video. User may ask follow-up questions. User is using language zh-tw, please also use zh-tw to reply them."
-
-async def generate_analyze(file):
-    global convo
-    convo = client.chats.create(
-        model='models/gemini-1.5-pro',
-        history=[],
-        config=dict(
-            generation_config=generation_config,
-            safety_settings=safety_settings,
-            system_instruction=system_instruction,
-        )
+# Conditionally create the client based on whether a base_url is provided
+if openai_base_url:
+    client = OpenAI(
+        api_key=openai_api_key,
+        base_url=openai_base_url,
     )
-    is_finished = False
+else:
+    client = OpenAI(
+        api_key=openai_api_key,
+    )
 
-    retry_times = 0
-    while not is_finished:
-        try:
-            reply_msg = await client.aio.chats.send_message(
-                chat=convo.name,
-                contents=[file]
-            )
-            is_finished = True
-        except Exception as e:
-            print(f"Error: {e}")
-            print("retrying...")
-            retry_times += 1
-            await asyncio.sleep(1)
+# To store conversation history
+conversation_history = []
 
-            if retry_times > 5:
-                return "Error: Too many retries. Please try again later. Last error: " + str(e)
+system_instruction = "You are a video analyzer, you have to watch the video user provided, and respond with detailed description of the video. User may ask follow-up questions. User is using language zh-tw, please also use zh-tw to reply them."
 
-    return reply_msg.text + "\n\n" + "-# Reply to this message to ask follow-up questions."
+async def generate_analyze(video_base64: str):
+    """
+    Analyzes a video from a base64 encoded string using OpenAI API.
+    """
+    global conversation_history
+    # Reset history for new video
+    conversation_history = [
+        {
+            "role": "system",
+            "content": system_instruction
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Please describe the contents of this video.",
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:video/mp4;base64,{video_base64}",
+                    },
+                },
+            ],
+        }
+    ]
 
-async def ask_followup(question):
-    global convo
+    try:
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model="[EXPRESS] gemini-2.5-pro",
+            messages=conversation_history,
+            max_tokens=9000, # Increased max_tokens for more complete answers
+        )
+        reply = response.choices[0].message.content
+        conversation_history.append({"role": "assistant", "content": reply})
+        return reply + "\n\n" + "-# Reply to this message to ask follow-up questions."
+    except Exception as e:
+        print(f"Error analyzing video: {e}")
+        return f"Error: Could not analyze the video. {e}"
 
-    retry_times = 0
-    is_finished = False
-    while not is_finished:
-        try:
-            reply_msg = await client.aio.chats.send_message(
-                chat=convo.name,
-                contents=[question]
-            )
-            is_finished = True
-        except Exception as e:
-            print(f"Error: {e}")
-            print("retrying...")
-            retry_times += 1
-            await asyncio.sleep(1)
+async def ask_followup(question: str):
+    """
+    Asks a follow-up question about the video.
+    """
+    global conversation_history
+    if not conversation_history:
+        return "Error: You need to analyze a video first before asking follow-up questions."
 
-            if retry_times > 5:
-                return "Error: Too many retries. Please try again later. Last error: " + str(e)
-    return reply_msg.text
+    conversation_history.append({"role": "user", "content": question})
+
+    try:
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model="[EXPRESS] gemini-2.5-pro",
+            messages=conversation_history,
+            max_tokens=4095, # Increased max_tokens for more complete answers
+        )
+        reply = response.choices[0].message.content
+        conversation_history.append({"role": "assistant", "content": reply})
+        return reply
+    except Exception as e:
+        print(f"Error during follow-up: {e}")
+        return f"Error: Could not get a response. {e}"
