@@ -10,6 +10,45 @@ from download_video import download_video, remove_video
 
 client = discord.Client(intents=discord.Intents.all())
 
+async def process_video_analysis(message, url):
+    """
+    Handles the entire video analysis process for a given message and URL.
+    """
+    reply_msg = await message.reply("## <a:loading:1281561134968606750> Downloading video...")
+    
+    video_filename = None
+    try:
+        # 1. Download the video
+        video_filename = download_video(url)
+        if not video_filename:
+            await reply_msg.edit(content="❌ **Download Failed:** The video might be private, region-locked, or the URL is invalid.")
+            return
+
+        # 2. Encode the video file in base64
+        await reply_msg.edit(content="## <a:loading:1281561134968606750> Encoding video for analysis...")
+        with open(video_filename, "rb") as video_file:
+            video_base64 = base64.b64encode(video_file.read()).decode('utf-8')
+
+        # 3. Send to analysis
+        await reply_msg.edit(content="## <a:loading:1281561134968606750> Analyzing Video... This may take a while...")
+        reply_text = await generate_analyze(video_base64)
+        
+        # 4. Send the results
+        await reply_msg.edit(content=f"✅ **Analysis Complete!**")
+        reply_chunks = await splitmsg(reply_text)
+        for i, chunk in enumerate(reply_chunks):
+            if i == 0:
+                await message.reply(chunk)
+            else:
+                await message.channel.send(chunk)
+        
+    except Exception as e:
+        await reply_msg.edit(content=f"❌ **An unexpected error occurred:** {e}")
+    finally:
+        # 5. Clean up the downloaded file
+        if video_filename:
+            remove_video(video_filename)
+
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user}')
@@ -28,47 +67,11 @@ async def on_message(message):
 
         url = parts[1]
         if re.match(r"https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)", url):
-            
-            reply_msg = await message.reply("## <a:loading:1281561134968606750> Downloading video...")
-            
-            video_filename = None
-            try:
-                # Download the video
-                video_filename = download_video(url)
-                if not video_filename:
-                    await reply_msg.edit(content="Failed to download the video. It might be private, region-locked, or an invalid URL.")
-                    return
-
-                await reply_msg.edit(content="## <a:loading:1281561134968606750> Encoding video for analysis...")
-
-                # Read and encode the video file in base64
-                with open(video_filename, "rb") as video_file:
-                    video_base64 = base64.b64encode(video_file.read()).decode('utf-8')
-
-                await reply_msg.edit(content="## <a:loading:1281561134968606750> Analyzing Video... This may take a while...")
-                
-                # Send to analysis
-                reply_text = await generate_analyze(video_base64)
-                
-                await reply_msg.edit(content=f"✅ Analysis Complete!")
-
-                reply_chunks = await splitmsg(reply_text)
-                for i, chunk in enumerate(reply_chunks):
-                    if i == 0:
-                        await message.reply(chunk)
-                    else:
-                        await message.channel.send(chunk)
-                
-            except Exception as e:
-                await reply_msg.edit(content=f"An unexpected error occurred: {e}")
-            finally:
-                # Clean up the downloaded file
-                if video_filename:
-                    remove_video(video_filename)
-            return
+            # Offload the processing to a separate function
+            asyncio.create_task(process_video_analysis(message, url))
         else:
             await message.reply("Invalid URL provided.")
-            return
+        return
         
     # Check if the bot is mentioned in a reply for follow-up questions
     if message.reference and message.reference.message_id:
