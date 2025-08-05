@@ -72,38 +72,48 @@ async def on_message(message):
     if message.author == client.user:
         return
 
-    # Check if the bot is mentioned at the beginning of the message for video analysis
-    if message.content.startswith(f"<@{str(client.user.id)}>"):
+    url = None
+    # Check for URL in DMs
+    if isinstance(message.channel, discord.DMChannel):
         match = re.search(r'https?://\S+', message.content)
         if match:
             url = match.group(0)
-            # Offload the processing to a separate function
-            asyncio.create_task(process_video_analysis(message, url))
-        else:
-            await message.reply("請提供一個有效的影片 URL。")
-        return
-        
-    # Check if the bot is mentioned in a reply for follow-up questions
-    if message.reference and message.reference.message_id:
-        try:
-            replied_to_message = await message.channel.fetch_message(message.reference.message_id)
-            if replied_to_message.author == client.user:
-                analyzer = active_analyzers.get(message.channel.id)
-                if not analyzer:
-                    await message.reply("I don't have the context of the previous video. Please start a new analysis.")
-                    return
-                
-                await message.add_reaction(LOADING_EMOJI)
-                
-                follow_up_reply = await analyzer.ask_question(message.content)
-                
-                await send_reply_chunks(message, follow_up_reply)
 
-                await message.remove_reaction(LOADING_EMOJI, client.user)
-                return
-        except discord.NotFound:
-            pass
-        except Exception as e:
-            print(f"Error during follow-up check: {e}")
+    # Check for mentions or replies
+    elif message.content.startswith(f"<@{str(client.user.id)}>") or (message.reference and f"<@{str(client.user.id)}>" in message.content):
+        content_to_check = message.content
+        
+        # If it's a reply, check the replied message's content for a URL
+        if message.reference and message.reference.message_id:
+            try:
+                replied_to_message = await message.channel.fetch_message(message.reference.message_id)
+                # If the replied message is from the bot, it might be a follow-up question
+                if replied_to_message.author == client.user:
+                    analyzer = active_analyzers.get(message.channel.id)
+                    if analyzer:
+                        await message.add_reaction(LOADING_EMOJI)
+                        follow_up_reply = await analyzer.ask_question(message.content)
+                        await send_reply_chunks(message, follow_up_reply)
+                        await message.remove_reaction(LOADING_EMOJI, client.user)
+                        return # Stop further processing
+                    else:
+                        # If there's no active analyzer, it might be a reply to a non-analysis message.
+                        # Continue to check for a URL in the replied message.
+                        pass
+                
+                content_to_check = replied_to_message.content
+            except discord.NotFound:
+                pass # If replied message is not found, just check the current message
+            except Exception as e:
+                print(f"Error fetching replied message: {e}")
+
+        match = re.search(r'https?://\S+', content_to_check)
+        if match:
+            url = match.group(0)
+
+    if url:
+        asyncio.create_task(process_video_analysis(message, url))
+    elif (isinstance(message.channel, discord.DMChannel) or message.content.startswith(f"<@{str(client.user.id)}>")):
+        await message.reply("請提供一個有效的影片 URL。")
 
 client.run(discord_token)
