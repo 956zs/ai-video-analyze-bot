@@ -12,7 +12,7 @@ def download_video(url):
     filename = f"temp_vid_{unique_id}.mp4"
 
     ydl_opts = {
-        'format': 'best[vcodec!=none][acodec!=none]/best',
+        'format': 'bestvideo+bestaudio/best',
         'outtmpl': filename,
         'quiet': True,
         'overwrite': True,
