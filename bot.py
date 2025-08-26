@@ -1,19 +1,19 @@
 import discord
 import re
 import asyncio
-import base64
 import os
+import httpx
+import json
 
-from load_config import discord_token, openai_api_key, openai_base_url
-from analyze import VideoAnalyzer
+from load_config import discord_token
 from split import splitmsg
-from download_video import download_video, remove_video
 
 LOADING_EMOJI = "<a:loading:1281561134968606750>"
-OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "[EXPRESS] gemini-2.5-pro")
+API_BASE_URL = "http://127.0.0.1:8000" # Make sure this matches your API server address
 
 client = discord.Client(intents=discord.Intents.all())
-active_analyzers = {}
+# Maps a channel ID to the last successful task_id for follow-up questions
+channel_task_ids = {}
 
 async def send_reply_chunks(message, text):
     """
@@ -28,40 +28,54 @@ async def send_reply_chunks(message, text):
 
 async def process_video_analysis(message, url):
     """
-    Handles the entire video analysis process for a given message and URL.
+    Handles the video analysis process by calling the backend API.
     """
-    reply_msg = await message.reply(f"## {LOADING_EMOJI} Downloading video...")
+    reply_msg = await message.reply(f"## {LOADING_EMOJI} Requesting video analysis...")
     
-    video_filename = None
     try:
-        # 1. Download the video
-        video_filename = download_video(url)
-        if not video_filename:
-            await reply_msg.edit(content="❌ **Download Failed:** The video might be private, region-locked, or the URL is invalid.")
-            return
+        async with httpx.AsyncClient(timeout=None) as http_client:
+            # 1. Start the analysis task
+            response = await http_client.post(f"{API_BASE_URL}/analyze", json={"video_url": url})
+            response.raise_for_status()
+            data = response.json()
+            task_id = data.get("task_id")
 
-        # 2. Encode the video file in base64
-        await reply_msg.edit(content=f"## {LOADING_EMOJI} Encoding video for analysis...")
-        with open(video_filename, "rb") as video_file:
-            video_base64 = base64.b64encode(video_file.read()).decode('utf-8')
+            if not task_id:
+                await reply_msg.edit(content="❌ **API Error:** Could not start analysis task.")
+                return
 
-        # 3. Send to analysis
-        await reply_msg.edit(content=f"## {LOADING_EMOJI} Analyzing Video... This may take a while...")
-        analyzer = VideoAnalyzer(api_key=openai_api_key, base_url=openai_base_url, model_name=OPENAI_MODEL_NAME)
-        active_analyzers[message.channel.id] = analyzer
-        reply_text = await analyzer.analyze_video_transcript(video_base64)
-        
-        # 4. Send the results
-        await reply_msg.edit(content=f"✅ **Analysis Complete!**")
-        await send_reply_chunks(message, reply_text)
-        
+            # 2. Poll for the result
+            while True:
+                await asyncio.sleep(5) # Wait for 5 seconds before checking status
+                status_response = await http_client.get(f"{API_BASE_URL}/status/{task_id}")
+                status_response.raise_for_status()
+                status_data = status_response.json()
+                
+                current_status = status_data.get("status")
+                await reply_msg.edit(content=f"## {LOADING_EMOJI} Analysis in progress... (Status: {current_status})")
+
+                if current_status == "completed":
+                    result_response = await http_client.get(f"{API_BASE_URL}/result/{task_id}")
+                    result_response.raise_for_status()
+                    result_data = result_response.json()
+                    
+                    await reply_msg.edit(content="✅ **Analysis Complete!**")
+                    await send_reply_chunks(message, result_data.get("result"))
+                    channel_task_ids[message.channel.id] = task_id # Save task_id for follow-ups
+                    break
+                elif current_status == "failed":
+                    result_response = await http_client.get(f"{API_BASE_URL}/result/{task_id}")
+                    result_data = result_response.json()
+                    error_message = result_data.get("result", "An unknown error occurred.")
+                    await reply_msg.edit(content=f"❌ **Analysis Failed:** {error_message}")
+                    break
+    
+    except httpx.RequestError as e:
+        print(f"HTTP Request Error: {e}")
+        await reply_msg.edit(content="❌ **API Connection Error:** Could not connect to the analysis service.")
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
         await reply_msg.edit(content="❌ **An unexpected error occurred.** Please try again later or contact the administrator.")
-    finally:
-        # 5. Clean up the downloaded file
-        if video_filename:
-            remove_video(video_filename)
 
 @client.event
 async def on_ready():
@@ -87,25 +101,28 @@ async def on_message(message):
         if message.reference and message.reference.message_id:
             try:
                 replied_to_message = await message.channel.fetch_message(message.reference.message_id)
-                # If the replied message is from the bot, it might be a follow-up question
+                
+                # If the replied message is from the bot, it's a follow-up question
                 if replied_to_message.author == client.user:
-                    analyzer = active_analyzers.get(message.channel.id)
-                    if analyzer:
+                    task_id = channel_task_ids.get(message.channel.id)
+                    if task_id:
                         await message.add_reaction(LOADING_EMOJI)
-                        follow_up_reply = await analyzer.ask_question(message.content)
-                        await send_reply_chunks(message, follow_up_reply)
+                        async with httpx.AsyncClient(timeout=None) as http_client:
+                            response = await http_client.post(
+                                f"{API_BASE_URL}/ask",
+                                json={"task_id": task_id, "question": message.content}
+                            )
+                            response.raise_for_status()
+                            data = response.json()
+                            await send_reply_chunks(message, data.get("answer", "No answer received."))
                         await message.remove_reaction(LOADING_EMOJI, client.user)
                         return # Stop further processing
-                    else:
-                        # If there's no active analyzer, it might be a reply to a non-analysis message.
-                        # Continue to check for a URL in the replied message.
-                        pass
                 
                 content_to_check = replied_to_message.content
             except discord.NotFound:
                 pass # If replied message is not found, just check the current message
             except Exception as e:
-                print(f"Error fetching replied message: {e}")
+                print(f"Error processing follow-up or fetching replied message: {e}")
 
         match = re.search(r'https?://\S+', content_to_check)
         if match:
