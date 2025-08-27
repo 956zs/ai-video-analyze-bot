@@ -1,11 +1,11 @@
 import asyncio
-import base64
 import uuid
 import os
 import time
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, Depends
 from pydantic import BaseModel
 from typing import Dict, Any
+from contextlib import asynccontextmanager
 
 from load_config import openai_api_key, openai_base_url
 from analyze import VideoAnalyzer
@@ -19,7 +19,14 @@ OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "[EXPRESS] gemini-2.5-pro")
 DEBUG_TIMING = os.getenv("DEBUG_TIMING", "false").lower() in ("true", "1", "t")
 
 # --- FastAPI App Initialization ---
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start a background task to clean up old tasks
+    asyncio.create_task(cleanup_old_tasks())
+    yield
+    # Any cleanup on shutdown can go here
+
+app = FastAPI(lifespan=lifespan)
 
 # --- Pydantic Models ---
 class AnalyzeRequest(BaseModel):
@@ -30,7 +37,7 @@ class AskRequest(BaseModel):
     question: str
 
 # --- Background Task for Video Analysis ---
-def run_analysis(task_id: str, url: str):
+async def run_analysis(task_id: str, url: str):
     """
     This function runs in the background to download, encode, and analyze the video.
     It also records the time taken for each step.
@@ -40,35 +47,25 @@ def run_analysis(task_id: str, url: str):
     try:
         # 1. Download the video
         tasks[task_id]["status"] = "downloading"
-        video_filename = download_video(url)
+        # Run synchronous download in a thread to avoid blocking the event loop
+        video_filename = await asyncio.to_thread(download_video, url)
         download_end_time = time.time()
         if not video_filename:
             tasks[task_id]["status"] = "failed"
             tasks[task_id]["result"] = "Download Failed: The video might be private, region-locked, or the URL is invalid."
             return
 
-        # 2. Encode the video file in base64
-        tasks[task_id]["status"] = "encoding"
-        with open(video_filename, "rb") as video_file:
-            video_base64 = base64.b64encode(video_file.read()).decode('utf-8')
-        encoding_end_time = time.time()
-
-        # 3. Send to analysis
+        # 2. Send to analysis
         tasks[task_id]["status"] = "analyzing"
         analyzer = VideoAnalyzer(api_key=openai_api_key, base_url=openai_base_url, model_name=OPENAI_MODEL_NAME)
         analyzers[task_id] = analyzer # Store the analyzer instance for follow-up questions
         
-        # Running async function in a sync context
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        reply_text = loop.run_until_complete(analyzer.analyze_video_transcript(video_base64))
-        loop.close()
+        reply_text = await analyzer.analyze_video_from_path(video_filename)
         analysis_end_time = time.time()
 
-        # 4. Format timing report and store the results
+        # 3. Format timing report and store the results
         download_duration = download_end_time - start_time
-        encoding_duration = encoding_end_time - download_end_time
-        analysis_duration = analysis_end_time - encoding_end_time
+        analysis_duration = analysis_end_time - download_end_time
         total_duration = analysis_end_time - start_time
 
         tasks[task_id]["status"] = "completed"
@@ -77,7 +74,6 @@ def run_analysis(task_id: str, url: str):
                 f"\n\n---\n"
                 f"**⏱️ Timing Report:**\n"
                 f"- Download: `{download_duration:.2f}s`\n"
-                f"- Encoding: `{encoding_duration:.2f}s`\n"
                 f"- Analysis: `{analysis_duration:.2f}s`\n"
                 f"**- Total: `{total_duration:.2f}s`**"
             )
@@ -92,14 +88,37 @@ def run_analysis(task_id: str, url: str):
     finally:
         # 5. Clean up the downloaded file
         if video_filename:
-            remove_video(video_filename)
+            # Run synchronous remove in a thread
+            await asyncio.to_thread(remove_video, video_filename)
+
+# --- Background Task for Cleanup ---
+async def cleanup_old_tasks():
+    """
+    Periodically cleans up tasks and analyzers that are older than a certain threshold.
+    """
+    while True:
+        await asyncio.sleep(3600)  # Run every hour
+        now = time.time()
+        task_ids_to_delete = []
+        for task_id, task_data in tasks.items():
+            # Check if 'start_time' exists and if the task is older than 1 hour
+            if "start_time" in task_data and (now - task_data["start_time"]) > 3600:
+                task_ids_to_delete.append(task_id)
+
+        for task_id in task_ids_to_delete:
+            if task_id in tasks:
+                del tasks[task_id]
+            if task_id in analyzers:
+                del analyzers[task_id]
+        if task_ids_to_delete:
+            print(f"Cleaned up {len(task_ids_to_delete)} old tasks.")
 
 # --- API Endpoints ---
 @app.post("/analyze")
-async def analyze_video(request: AnalyzeRequest, background_tasks: BackgroundTasks):
+async def analyze_video(request: AnalyzeRequest):
     task_id = str(uuid.uuid4())
-    tasks[task_id] = {"status": "pending", "result": None}
-    background_tasks.add_task(run_analysis, task_id, request.video_url)
+    tasks[task_id] = {"status": "pending", "result": None, "start_time": time.time()}
+    asyncio.create_task(run_analysis(task_id, request.video_url))
     return {"task_id": task_id, "message": "Video analysis started."}
 
 @app.get("/status/{task_id}")
